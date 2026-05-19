@@ -2240,39 +2240,6 @@ if (isT8200BinaryDownload && message.signCode > 0 && data_length >= 128) {
 
     const rsaKey = this.currentMessageState[message.dataType].rsaKey;
 
-    const looksLikeH264 = (buf: Buffer): boolean => {
-        const maxOffset = Math.min(buf.length - 5, 2048);
-
-        for (let i = 0; i <= maxOffset; i++) {
-            const four =
-                buf[i] === 0x00 &&
-                buf[i + 1] === 0x00 &&
-                buf[i + 2] === 0x00 &&
-                buf[i + 3] === 0x01;
-
-            const three =
-                buf[i] === 0x00 &&
-                buf[i + 1] === 0x00 &&
-                buf[i + 2] === 0x01;
-
-            if (four) {
-                const nalType = buf[i + 4] & 0x1f;
-                if ([1, 5, 7, 8].includes(nalType)) {
-                    return true;
-                }
-            }
-
-            if (three) {
-                const nalType = buf[i + 3] & 0x1f;
-                if ([1, 5, 7, 8].includes(nalType)) {
-                    return true;
-                }
-            }
-        }
-
-        return false;
-    };
-
     const findFirstH264 = (buf: Buffer): Record<string, unknown> | undefined => {
         const maxOffset = Math.min(buf.length - 5, 2048);
 
@@ -2316,125 +2283,46 @@ if (isT8200BinaryDownload && message.signCode > 0 && data_length >= 128) {
         return undefined;
     };
 
-    const tryAesKey = (
-        key: Buffer,
-        encryptedPayload: Buffer
-    ): Buffer | undefined => {
-        if (![16, 24, 32].includes(key.length)) {
-            return undefined;
-        }
-
-        try {
-            return decryptAESData(key.toString("hex"), encryptedPayload);
-        } catch {
-            return undefined;
-        }
-    };
-
     let matchFound = false;
 
-    if (rsaKey) {
-        const rsaCandidates: Array<{ name: string; block: Buffer }> = [];
+    if (rsaKey && videoMetaData.videoSeqNo === 0) {
+        for (const rsaOffset of [150, 151]) {
+            const block = message.data.subarray(rsaOffset, rsaOffset + 128);
 
-        for (let offset = 0; offset <= 180; offset++) {
-            const block = message.data.subarray(offset, offset + 128);
-
-            if (block.length === 128) {
-                rsaCandidates.push({
-                    name: `offset${offset}_len128`,
-                    block,
-                });
+            if (block.length !== 128) {
+                continue;
             }
-        }
-
-        for (const candidate of rsaCandidates) {
-            const decryptedCandidates: Array<{ name: string; data: Buffer }> = [];
 
             try {
-                const decryptedNodeRsa = rsaKey.decrypt(candidate.block) as Buffer;
+                const decrypted = rsaKey.decrypt(block) as Buffer;
 
-                decryptedCandidates.push({
-                    name: `${candidate.name}_nodeRsaDefault`,
-                    data: decryptedNodeRsa,
-                });
-            } catch {
-                // Ignore.
-            }
+                const aesCandidates: Array<{ name: string; key: Buffer }> = [];
 
-            const privateKeyPem = rsaKey.exportKey("private") as string;
-
-            for (const paddingTest of [
-                {
-                    name: "RSA_PKCS1_PADDING",
-                    padding: constants.RSA_PKCS1_PADDING,
-                },
-                {
-                    name: "RSA_PKCS1_OAEP_PADDING",
-                    padding: constants.RSA_PKCS1_OAEP_PADDING,
-                },
-                {
-                    name: "RSA_NO_PADDING",
-                    padding: constants.RSA_NO_PADDING,
-                },
-            ]) {
-                try {
-                    const decryptedCrypto = privateDecrypt(
-                        {
-                            key: privateKeyPem,
-                            padding: paddingTest.padding,
-                        },
-                        candidate.block
-                    );
-
-                    decryptedCandidates.push({
-                        name: `${candidate.name}_${paddingTest.name}`,
-                        data: decryptedCrypto,
-                    });
-                } catch {
-                    // Ignore.
-                }
-            }
-
-            for (const decrypted of decryptedCandidates) {
-                const aesKeyCandidates: Array<{ name: string; key: Buffer }> = [];
-
-                if (decrypted.data.length >= 16) {
-                    aesKeyCandidates.push({
-                        name: `${decrypted.name}_first16`,
-                        key: decrypted.data.subarray(0, 16),
+                if (decrypted.length >= 16) {
+                    aesCandidates.push({
+                        name: `offset${rsaOffset}_first16`,
+                        key: decrypted.subarray(0, 16),
                     });
 
-                    aesKeyCandidates.push({
-                        name: `${decrypted.name}_last16`,
-                        key: decrypted.data.subarray(decrypted.data.length - 16),
+                    aesCandidates.push({
+                        name: `offset${rsaOffset}_last16`,
+                        key: decrypted.subarray(decrypted.length - 16),
                     });
                 }
 
-                if (decrypted.data.length >= 24) {
-                    aesKeyCandidates.push({
-                        name: `${decrypted.name}_first24`,
-                        key: decrypted.data.subarray(0, 24),
+                if (decrypted.length >= 32) {
+                    aesCandidates.push({
+                        name: `offset${rsaOffset}_first32`,
+                        key: decrypted.subarray(0, 32),
                     });
 
-                    aesKeyCandidates.push({
-                        name: `${decrypted.name}_last24`,
-                        key: decrypted.data.subarray(decrypted.data.length - 24),
-                    });
-                }
-
-                if (decrypted.data.length >= 32) {
-                    aesKeyCandidates.push({
-                        name: `${decrypted.name}_first32`,
-                        key: decrypted.data.subarray(0, 32),
-                    });
-
-                    aesKeyCandidates.push({
-                        name: `${decrypted.name}_last32`,
-                        key: decrypted.data.subarray(decrypted.data.length - 32),
+                    aesCandidates.push({
+                        name: `offset${rsaOffset}_last32`,
+                        key: decrypted.subarray(decrypted.length - 32),
                     });
                 }
 
-                for (const aesCandidate of aesKeyCandidates) {
+                for (const aesCandidate of aesCandidates) {
                     for (const payloadCandidate of [
                         {
                             name: "payload_from22",
@@ -2445,44 +2333,45 @@ if (isT8200BinaryDownload && message.signCode > 0 && data_length >= 128) {
                             payload: message.data.subarray(151, 151 + videoMetaData.videoDataLength),
                         },
                     ]) {
-                        const decryptedPayload = tryAesKey(
-                            aesCandidate.key,
-                            payloadCandidate.payload
-                        );
-
-                        if (!decryptedPayload) {
-                            continue;
-                        }
-
-                        const h264 = findFirstH264(decryptedPayload);
-
-                        if (h264) {
-                            matchFound = true;
-
-                            rootP2PLogger.warn(
-                                `T8200 download patch H: AES/RSA match found`,
-                                {
-                                    stationSN: this.rawStation.station_sn,
-                                    rsaCandidate: candidate.name,
-                                    decryptedCandidate: decrypted.name,
-                                    aesCandidate: aesCandidate.name,
-                                    payloadCandidate: payloadCandidate.name,
-                                    aesKeyLength: aesCandidate.key.length,
-                                    h264,
-                                    decryptedPayloadFirst64Hex: decryptedPayload
-                                        .subarray(0, 64)
-                                        .toString("hex"),
-                                }
+                        try {
+                            const decryptedPayload = decryptAESData(
+                                aesCandidate.key.toString("hex"),
+                                payloadCandidate.payload
                             );
+
+                            const h264 = findFirstH264(decryptedPayload);
+
+                            if (h264) {
+                                matchFound = true;
+
+                                rootP2PLogger.warn(
+                                    `T8200 download patch H-lite: AES/RSA match found`,
+                                    {
+                                        stationSN: this.rawStation.station_sn,
+                                        rsaOffset,
+                                        aesCandidate: aesCandidate.name,
+                                        payloadCandidate: payloadCandidate.name,
+                                        aesKeyLength: aesCandidate.key.length,
+                                        h264,
+                                        decryptedPayloadFirst64Hex: decryptedPayload
+                                            .subarray(0, 64)
+                                            .toString("hex"),
+                                    }
+                                );
+                            }
+                        } catch {
+                            // Ignore failed AES candidate.
                         }
                     }
                 }
+            } catch {
+                // Ignore failed RSA candidate.
             }
         }
     }
 
     rootP2PLogger.warn(
-        `T8200 download patch H: signCode AES/RSA diagnostic completed`,
+        `T8200 download patch H-lite: diagnostic completed`,
         {
             stationSN: this.rawStation.station_sn,
             matchFound,
