@@ -3,7 +3,7 @@ import { TypedEmitter } from "tiny-typed-emitter";
 import * as NodeRSA from "node-rsa";
 import { Readable } from "stream";
 import { SortedMap } from "sweet-collections";
-import { privateDecrypt, constants } from "crypto";
+import { privateDecrypt, constants, createDecipheriv, createHash } from "crypto";
 import { appendFileSync } from "fs";
 const { parse } = require("date-and-time");
 
@@ -2239,51 +2239,198 @@ if (isT8200BinaryDownload && message.signCode > 0 && data_length >= 128) {
     payloadStart = 22;
     videoMetaData.aesKey = "";
 
-    const sha256Hex = (buffer: Buffer | string | undefined): string => {
-        if (buffer === undefined || buffer === "") {
-            return "";
+    const findFirstH264 = (buf: Buffer): Record<string, unknown> | undefined => {
+        const maxOffset = Math.min(buf.length - 5, 4096);
+
+        for (let i = 0; i <= maxOffset; i++) {
+            const four =
+                buf[i] === 0x00 &&
+                buf[i + 1] === 0x00 &&
+                buf[i + 2] === 0x00 &&
+                buf[i + 3] === 0x01;
+
+            const three =
+                buf[i] === 0x00 &&
+                buf[i + 1] === 0x00 &&
+                buf[i + 2] === 0x01;
+
+            if (four) {
+                const nalType = buf[i + 4] & 0x1f;
+
+                if ([1, 5, 7, 8].includes(nalType)) {
+                    return {
+                        offset: i,
+                        prefix: "00000001",
+                        nalType,
+                        first32Hex: buf.subarray(i, i + 32).toString("hex"),
+                    };
+                }
+            }
+
+            if (three) {
+                const nalType = buf[i + 3] & 0x1f;
+
+                if ([1, 5, 7, 8].includes(nalType)) {
+                    return {
+                        offset: i,
+                        prefix: "000001",
+                        nalType,
+                        first32Hex: buf.subarray(i, i + 32).toString("hex"),
+                    };
+                }
+            }
         }
 
-        const crypto = require("crypto");
-        const value = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
-
-        return crypto
-            .createHash("sha256")
-            .update(value)
-            .digest("hex");
+        return undefined;
     };
 
+    const tryDecrypt = (
+        algorithm: string,
+        key: Buffer,
+        iv: Buffer | null,
+        input: Buffer
+    ): Buffer | undefined => {
+        try {
+            const decipher = createDecipheriv(algorithm, key, iv);
+            decipher.setAutoPadding(false);
+
+            return Buffer.concat([
+                decipher.update(input),
+                decipher.final(),
+            ]);
+        } catch {
+            return undefined;
+        }
+    };
+
+    const dsk = Buffer.from(this.dskKey ?? "");
+    const sha256 = createHash("sha256").update(dsk).digest();
+    const md5 = createHash("md5").update(dsk).digest();
+
+    const keyCandidates: Array<{ name: string; key: Buffer }> = [];
+
+    if (dsk.length >= 16) {
+        keyCandidates.push({
+            name: "dsk_first16",
+            key: dsk.subarray(0, 16),
+        });
+
+        keyCandidates.push({
+            name: "dsk_last16",
+            key: dsk.subarray(dsk.length - 16),
+        });
+    }
+
+    keyCandidates.push({
+        name: "sha256_dsk_first16",
+        key: sha256.subarray(0, 16),
+    });
+
+    keyCandidates.push({
+        name: "sha256_dsk_first32",
+        key: sha256.subarray(0, 32),
+    });
+
+    keyCandidates.push({
+        name: "md5_dsk",
+        key: md5,
+    });
+
+    const header = message.data.subarray(0, 22);
+    const payload = message.data.subarray(22, 22 + videoMetaData.videoDataLength);
+    const scanPayload = payload.subarray(0, Math.min(payload.length, 4096));
+
+    const ivCandidates: Array<{ name: string; iv: Buffer }> = [
+        {
+            name: "zero_iv",
+            iv: Buffer.alloc(16, 0),
+        },
+        {
+            name: "header_first16",
+            iv: header.subarray(0, 16),
+        },
+        {
+            name: "payload_first16",
+            iv: payload.subarray(0, 16),
+        },
+    ];
+
+    let matchFound = false;
+
+    for (const keyCandidate of keyCandidates) {
+        const keyLength = keyCandidate.key.length;
+
+        const algorithms =
+            keyLength === 16
+                ? ["aes-128-ecb", "aes-128-cbc", "aes-128-ctr", "aes-128-cfb"]
+                : keyLength === 32
+                    ? ["aes-256-ecb", "aes-256-cbc", "aes-256-ctr", "aes-256-cfb"]
+                    : [];
+
+        for (const algorithm of algorithms) {
+            const ivs = algorithm.endsWith("-ecb")
+                ? [{ name: "no_iv", iv: null as Buffer | null }]
+                : ivCandidates;
+
+            for (const ivCandidate of ivs) {
+                const decrypted = tryDecrypt(
+                    algorithm,
+                    keyCandidate.key,
+                    ivCandidate.iv,
+                    scanPayload
+                );
+
+                if (!decrypted) {
+                    continue;
+                }
+
+                const h264 = findFirstH264(decrypted);
+
+                if (h264) {
+                    matchFound = true;
+
+                    rootP2PLogger.warn(
+                        `T8200 download patch K: DSK AES match found`,
+                        {
+                            stationSN: this.rawStation.station_sn,
+                            videoSeqNo: videoMetaData.videoSeqNo,
+                            algorithm,
+                            keyCandidate: keyCandidate.name,
+                            keyLength,
+                            ivCandidate: ivCandidate.name,
+                            h264,
+                            decryptedFirst64Hex: decrypted.subarray(0, 64).toString("hex"),
+                        }
+                    );
+                }
+            }
+        }
+    }
+
     rootP2PLogger.warn(
-        `T8200 download patch J: session key diagnostic`,
+        `T8200 download patch K: DSK diagnostic completed`,
         {
             stationSN: this.rawStation.station_sn,
+            matchFound,
             commandIdName: CommandType[message.commandId],
             commandId: message.commandId,
             channel: message.channel,
             dataLength: data_length,
             signCode: message.signCode,
             payloadStart,
-
             videoSeqNo: videoMetaData.videoSeqNo,
             videoFPS: videoMetaData.videoFPS,
             videoWidth: videoMetaData.videoWidth,
             videoHeight: videoMetaData.videoHeight,
             videoDataLength: videoMetaData.videoDataLength,
             messageDataLength: message.data.length,
-
             hasP2PKey: this.p2pKey !== undefined,
-            p2pKeyLength: this.p2pKey !== undefined ? this.p2pKey.length : 0,
-            p2pKeySha256: this.p2pKey !== undefined ? sha256Hex(this.p2pKey) : "",
-
             hasDskKey: this.dskKey !== "",
             dskKeyLength: this.dskKey !== "" ? this.dskKey.length : 0,
-            dskKeySha256: this.dskKey !== "" ? sha256Hex(this.dskKey) : "",
-
-            first64From0Hex: message.data.subarray(0, 64).toString("hex"),
-            first64From22Hex: message.data.subarray(22, 86).toString("hex"),
         }
     );
 } else if (message.signCode > 0 && data_length >= 128) {
+  
   
             const key = message.data.subarray(22, 150);
             const rsaKey = this.currentMessageState[message.dataType].rsaKey;
