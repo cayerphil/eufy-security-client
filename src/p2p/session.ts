@@ -2379,18 +2379,14 @@ driverContext: {
             fullPayloadAfterHeaderLength: fullPayloadAfterHeader.length,
         },
 
-        keyContext: {
-            hasP2PKey: p2pKeyValue !== undefined,
-            p2pKeyType: typeof p2pKeyValue,
-            p2pKeyLength: Buffer.isBuffer(p2pKeyValue)
-                ? p2pKeyValue.length
-                : typeof p2pKeyValue === "string"
-                    ? p2pKeyValue.length
-                    : 0,
-            hasDskKey: dskKeyValue !== "",
-            dskKeyLength: dskKeyValue !== "" ? dskKeyValue.length : 0,
-            hasRsaKey: rsaPrivateKeyPem !== "",
-        },
+keyContext: {
+    hasP2PKey: p2pKeyValue !== undefined,
+    p2pKeyType: typeof p2pKeyValue,
+    p2pKeyLength: getValueLength(p2pKeyValue),
+    hasDskKey: dskKeyValue !== "",
+    dskKeyLength: dskKeyValue !== "" ? dskKeyValue.length : 0,
+    hasRsaKey: rsaPrivateKeyPem !== "",
+},
 
         headerHex: header.toString("hex"),
         headerBase64: header.toString("base64"),
