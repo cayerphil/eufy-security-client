@@ -2239,7 +2239,7 @@ if (isT8200BinaryDownload && message.signCode > 0 && data_length >= 128) {
     payloadStart = 22;
     videoMetaData.aesKey = "";
 
-    const dumpFile = "/config/t8200_final_offline_dump.jsonl";
+    const dumpFile = "/tmp/t8200_final_offline_dump.jsonl";
 
     const toBase64 = (value: unknown): string => {
         if (value === undefined || value === null) {
