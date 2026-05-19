@@ -2237,8 +2237,66 @@ if (isT8200BinaryDownload && message.signCode > 0 && data_length >= 128) {
     payloadStart = 22;
     videoMetaData.aesKey = "";
 
+    const findH264StartCodes = (
+        buffer: Buffer,
+        baseOffset: number,
+        scanLength: number
+    ): Array<{ offset: number; prefix: string; nalType: number; first16Hex: string }> => {
+        const results: Array<{ offset: number; prefix: string; nalType: number; first16Hex: string }> = [];
+        const max = Math.min(buffer.length - 5, scanLength);
+
+        for (let i = 0; i <= max; i++) {
+            const isFourByteStartCode =
+                buffer[i] === 0x00 &&
+                buffer[i + 1] === 0x00 &&
+                buffer[i + 2] === 0x00 &&
+                buffer[i + 3] === 0x01;
+
+            const isThreeByteStartCode =
+                buffer[i] === 0x00 &&
+                buffer[i + 1] === 0x00 &&
+                buffer[i + 2] === 0x01;
+
+            if (isFourByteStartCode) {
+                const nalByte = buffer[i + 4];
+                const nalType = nalByte & 0x1f;
+
+                results.push({
+                    offset: baseOffset + i,
+                    prefix: "00000001",
+                    nalType,
+                    first16Hex: buffer.subarray(i, i + 16).toString("hex"),
+                });
+            } else if (isThreeByteStartCode) {
+                const nalByte = buffer[i + 3];
+                const nalType = nalByte & 0x1f;
+
+                results.push({
+                    offset: baseOffset + i,
+                    prefix: "000001",
+                    nalType,
+                    first16Hex: buffer.subarray(i, i + 16).toString("hex"),
+                });
+            }
+
+            if (results.length >= 20) {
+                break;
+            }
+        }
+
+        return results;
+    };
+
+    const sliceForLog = (start: number, length: number): string => {
+        return message.data.subarray(start, start + length).toString("hex");
+    };
+
+    const from0 = message.data.subarray(0);
+    const from22 = message.data.subarray(22);
+    const from151 = message.data.subarray(151);
+
     rootP2PLogger.warn(
-        `T8200 download patch F: bypass RSA/AES and keep original video payload offset`,
+        `T8200 download patch G: signCode frame structure diagnostic`,
         {
             stationSN: this.rawStation.station_sn,
             commandIdName: CommandType[message.commandId],
@@ -2252,9 +2310,25 @@ if (isT8200BinaryDownload && message.signCode > 0 && data_length >= 128) {
             videoWidth: videoMetaData.videoWidth,
             videoHeight: videoMetaData.videoHeight,
             videoDataLength: videoMetaData.videoDataLength,
+
+            messageDataLength: message.data.length,
+
+            first64_from0_hex: sliceForLog(0, 64),
+            first256_from0_hex: sliceForLog(0, 256),
+
+            first64_from22_hex: sliceForLog(22, 64),
+            first256_from22_hex: sliceForLog(22, 256),
+
+            first64_from151_hex: sliceForLog(151, 64),
+            first256_from151_hex: sliceForLog(151, 256),
+
+            h264StartCodes_from0_first2048: findH264StartCodes(from0, 0, 2048),
+            h264StartCodes_from22_first2048: findH264StartCodes(from22, 22, 2048),
+            h264StartCodes_from151_first2048: findH264StartCodes(from151, 151, 2048),
         }
     );
 } else if (message.signCode > 0 && data_length >= 128) {
+
   
             const key = message.data.subarray(22, 150);
             const rsaKey = this.currentMessageState[message.dataType].rsaKey;
