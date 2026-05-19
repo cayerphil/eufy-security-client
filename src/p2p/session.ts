@@ -4,6 +4,7 @@ import * as NodeRSA from "node-rsa";
 import { Readable } from "stream";
 import { SortedMap } from "sweet-collections";
 import { privateDecrypt, constants } from "crypto";
+import { appendFileSync } from "fs";
 const { parse } = require("date-and-time");
 
 import {
@@ -2238,157 +2239,56 @@ if (isT8200BinaryDownload && message.signCode > 0 && data_length >= 128) {
     payloadStart = 22;
     videoMetaData.aesKey = "";
 
-    const rsaKey = this.currentMessageState[message.dataType].rsaKey;
-
-    const findFirstH264 = (buf: Buffer): Record<string, unknown> | undefined => {
-        const maxOffset = Math.min(buf.length - 5, 2048);
-
-        for (let i = 0; i <= maxOffset; i++) {
-            const four =
-                buf[i] === 0x00 &&
-                buf[i + 1] === 0x00 &&
-                buf[i + 2] === 0x00 &&
-                buf[i + 3] === 0x01;
-
-            const three =
-                buf[i] === 0x00 &&
-                buf[i + 1] === 0x00 &&
-                buf[i + 2] === 0x01;
-
-            if (four) {
-                const nalType = buf[i + 4] & 0x1f;
-                if ([1, 5, 7, 8].includes(nalType)) {
-                    return {
-                        offset: i,
-                        prefix: "00000001",
-                        nalType,
-                        first32Hex: buf.subarray(i, i + 32).toString("hex"),
-                    };
-                }
-            }
-
-            if (three) {
-                const nalType = buf[i + 3] & 0x1f;
-                if ([1, 5, 7, 8].includes(nalType)) {
-                    return {
-                        offset: i,
-                        prefix: "000001",
-                        nalType,
-                        first32Hex: buf.subarray(i, i + 32).toString("hex"),
-                    };
-                }
-            }
-        }
-
-        return undefined;
+    const dump = {
+        stationSN: this.rawStation.station_sn,
+        commandIdName: CommandType[message.commandId],
+        commandId: message.commandId,
+        channel: message.channel,
+        dataLength: data_length,
+        signCode: message.signCode,
+        payloadStart,
+        videoSeqNo: videoMetaData.videoSeqNo,
+        videoFPS: videoMetaData.videoFPS,
+        videoWidth: videoMetaData.videoWidth,
+        videoHeight: videoMetaData.videoHeight,
+        videoDataLength: videoMetaData.videoDataLength,
+        messageDataLength: message.data.length,
+        first64Hex: message.data.subarray(0, 64).toString("hex"),
+        messageDataBase64: message.data.toString("base64"),
+        payloadFrom22Base64: message.data
+            .subarray(22, 22 + videoMetaData.videoDataLength)
+            .toString("base64"),
+        payloadFrom151Base64: message.data
+            .subarray(151, 151 + videoMetaData.videoDataLength)
+            .toString("base64"),
     };
 
-    let matchFound = false;
+    try {
+        appendFileSync(
+            "/tmp/t8200_signcode_dump.jsonl",
+            `${JSON.stringify(dump)}\n`
+        );
 
-    if (rsaKey && videoMetaData.videoSeqNo === 0) {
-        for (const rsaOffset of [150, 151]) {
-            const block = message.data.subarray(rsaOffset, rsaOffset + 128);
-
-            if (block.length !== 128) {
-                continue;
+        rootP2PLogger.warn(
+            `T8200 download patch I: signCode frame dumped`,
+            {
+                stationSN: this.rawStation.station_sn,
+                videoSeqNo: videoMetaData.videoSeqNo,
+                dataLength: data_length,
+                messageDataLength: message.data.length,
+                dumpFile: "/tmp/t8200_signcode_dump.jsonl",
             }
-
-            try {
-                const decrypted = rsaKey.decrypt(block) as Buffer;
-
-                const aesCandidates: Array<{ name: string; key: Buffer }> = [];
-
-                if (decrypted.length >= 16) {
-                    aesCandidates.push({
-                        name: `offset${rsaOffset}_first16`,
-                        key: decrypted.subarray(0, 16),
-                    });
-
-                    aesCandidates.push({
-                        name: `offset${rsaOffset}_last16`,
-                        key: decrypted.subarray(decrypted.length - 16),
-                    });
-                }
-
-                if (decrypted.length >= 32) {
-                    aesCandidates.push({
-                        name: `offset${rsaOffset}_first32`,
-                        key: decrypted.subarray(0, 32),
-                    });
-
-                    aesCandidates.push({
-                        name: `offset${rsaOffset}_last32`,
-                        key: decrypted.subarray(decrypted.length - 32),
-                    });
-                }
-
-                for (const aesCandidate of aesCandidates) {
-                    for (const payloadCandidate of [
-                        {
-                            name: "payload_from22",
-                            payload: message.data.subarray(22, 22 + videoMetaData.videoDataLength),
-                        },
-                        {
-                            name: "payload_from151",
-                            payload: message.data.subarray(151, 151 + videoMetaData.videoDataLength),
-                        },
-                    ]) {
-                        try {
-                            const decryptedPayload = decryptAESData(
-                                aesCandidate.key.toString("hex"),
-                                payloadCandidate.payload
-                            );
-
-                            const h264 = findFirstH264(decryptedPayload);
-
-                            if (h264) {
-                                matchFound = true;
-
-                                rootP2PLogger.warn(
-                                    `T8200 download patch H-lite: AES/RSA match found`,
-                                    {
-                                        stationSN: this.rawStation.station_sn,
-                                        rsaOffset,
-                                        aesCandidate: aesCandidate.name,
-                                        payloadCandidate: payloadCandidate.name,
-                                        aesKeyLength: aesCandidate.key.length,
-                                        h264,
-                                        decryptedPayloadFirst64Hex: decryptedPayload
-                                            .subarray(0, 64)
-                                            .toString("hex"),
-                                    }
-                                );
-                            }
-                        } catch {
-                            // Ignore failed AES candidate.
-                        }
-                    }
-                }
-            } catch {
-                // Ignore failed RSA candidate.
+        );
+    } catch (error) {
+        rootP2PLogger.error(
+            `T8200 download patch I: failed to dump signCode frame`,
+            {
+                stationSN: this.rawStation.station_sn,
+                error,
             }
-        }
+        );
     }
-
-    rootP2PLogger.warn(
-        `T8200 download patch H-lite: diagnostic completed`,
-        {
-            stationSN: this.rawStation.station_sn,
-            matchFound,
-            commandIdName: CommandType[message.commandId],
-            commandId: message.commandId,
-            channel: message.channel,
-            dataLength: data_length,
-            signCode: message.signCode,
-            videoSeqNo: videoMetaData.videoSeqNo,
-            videoFPS: videoMetaData.videoFPS,
-            videoWidth: videoMetaData.videoWidth,
-            videoHeight: videoMetaData.videoHeight,
-            videoDataLength: videoMetaData.videoDataLength,
-        }
-    );
 } else if (message.signCode > 0 && data_length >= 128) {
-
   
             const key = message.data.subarray(22, 150);
             const rsaKey = this.currentMessageState[message.dataType].rsaKey;
